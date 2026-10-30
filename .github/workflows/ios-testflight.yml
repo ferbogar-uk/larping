@@ -38,15 +38,37 @@ jobs:
           PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
         run: |
           set -euo pipefail
+          umask 077
 
-          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          echo "$PROFILE" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          printf '%s' "$PROFILE" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
 
           security create-keychain -p "" build.keychain
           security set-keychain-settings -lut 21600 build.keychain
           security unlock-keychain -p "" build.keychain
 
-          security import "$RUNNER_TEMP/cert.p12" \
+          # Convert the original P12 to a macOS-compatible legacy PKCS#12.
+          # The certificate and key remain the same; only the wrapping format changes.
+          OPENSSL="$(brew --prefix openssl@3)/bin/openssl"
+          trap 'rm -f "$RUNNER_TEMP/signing.pem"' EXIT
+
+          "$OPENSSL" pkcs12 \
+            -in "$RUNNER_TEMP/cert.p12" \
+            -passin env:PASSWORD \
+            -nodes \
+            -out "$RUNNER_TEMP/signing.pem"
+
+          "$OPENSSL" pkcs12 -export \
+            -in "$RUNNER_TEMP/signing.pem" \
+            -out "$RUNNER_TEMP/cert-legacy.p12" \
+            -passout env:PASSWORD \
+            -keypbe PBE-SHA1-3DES \
+            -certpbe PBE-SHA1-3DES \
+            -macalg sha1
+
+          rm -f "$RUNNER_TEMP/signing.pem"
+
+          security import "$RUNNER_TEMP/cert-legacy.p12" \
             -k build.keychain \
             -P "$PASSWORD" \
             -T /usr/bin/codesign
@@ -82,7 +104,7 @@ jobs:
 
       - name: Create export options
         run: |
-          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF_OPTIONS
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
           "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -101,7 +123,7 @@ jobs:
             </dict>
           </dict>
           </plist>
-          EOF
+          EOF_OPTIONS
 
       - name: Export IPA
         run: |
@@ -123,5 +145,7 @@ jobs:
         run: |
           security delete-keychain build.keychain || true
           rm -f "$RUNNER_TEMP/cert.p12"
+          rm -f "$RUNNER_TEMP/cert-legacy.p12"
+          rm -f "$RUNNER_TEMP/signing.pem"
           rm -f "$RUNNER_TEMP/profile.mobileprovision"
           rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/larping.mobileprovision"
