@@ -2,6 +2,12 @@ name: iOS TestFlight
 
 on:
   workflow_dispatch:
+    inputs:
+      upload_to_testflight:
+        description: 'Upload signed IPA to App Store Connect'
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
@@ -141,9 +147,44 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Upload IPA to TestFlight
+        if: ${{ inputs.upload_to_testflight == true }}
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          test -n "$ASC_KEY_ID" || { echo "::error::Missing Key ID"; exit 1; }
+          test -n "$ASC_ISSUER_ID" || { echo "::error::Missing Issuer ID"; exit 1; }
+          test -n "$ASC_API_KEY" || { echo "::error::Missing API Key"; exit 1; }
+
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          KEY_FILE="$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          trap 'rm -f "$KEY_FILE"' EXIT
+
+          printf '%s\n' "$ASC_API_KEY" > "$KEY_FILE"
+
+          grep -q -- '-----BEGIN PRIVATE KEY-----' "$KEY_FILE" || {
+            echo "::error::API key must contain the raw .p8 private key"
+            exit 1
+          }
+          shopt -s nullglob
+          IPAS=("$RUNNER_TEMP"/export/*.ipa)
+          test "${#IPAS[@]}" -eq 1
+
+          xcrun altool --upload-app \
+            --type ios \
+            --file "${IPAS[0]}" \
+            --apiKey "$ASC_KEY_ID" \
+            --apiIssuer "$ASC_ISSUER_ID"
+            
       - name: Clean signing files
         if: always()
         run: |
+        
           security delete-keychain build.keychain || true
           rm -f "$RUNNER_TEMP/cert.p12"
           rm -f "$RUNNER_TEMP/cert-legacy.p12"
